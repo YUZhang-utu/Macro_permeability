@@ -7,7 +7,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import KFold
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from torchmetrics import AUROC, MatthewsCorrCoef, Accuracy
@@ -24,7 +24,7 @@ def set_seed(seed: int = 42):
 
 
 class LitGraphModel(pl.LightningModule):
-    def __init__(self, model, teacher_model, train_path, val_path, learning_rate, lambda_=0.2, temperature=5.0):
+    def __init__(self, model, teacher_model, train_path, val_path, learning_rate, lambda_=0.2, temperature=6.0):
         super().__init__()
         self.model = model
         self.teacher_model = teacher_model  # add teacher model
@@ -77,19 +77,6 @@ class LitGraphModel(pl.LightningModule):
             
             self.log('train_hard_loss', hard_loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
             self.log('train_soft_loss', soft_loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
-        else:
-            total_loss = hard_loss
-
-        
-        preds = torch.sigmoid(student_logits)
-        self.train_accuracy(preds, targets.float())
-        self.train_auc(preds, targets.float())
-        self.train_mcc(preds.round(), targets.int())
-
-        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_accuracy', self.train_accuracy, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_auc', self.train_auc, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_mcc', self.train_mcc, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
         return total_loss
 
@@ -127,21 +114,19 @@ class LitGraphModel(pl.LightningModule):
 
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description='Knowledge Distillation Training for Molecular Property Prediction',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
     # Data parameters
-    parser.add_argument('--small_data_path', type=str, required=True,
-                        help='Path to the small dataset CSV file for student model training')
-    parser.add_argument('--teacher_model_path', type=str, default=teacher_model.ckpt)
+    parser.add_argument('--small_data_path', type=str, required=True)
+    parser.add_argument('--teacher_model_path', type=str, default=None)
     parser.add_argument('--output_dir', type=str, default='output')
     
     # Model  parameters
     parser.add_argument('--node_feat_dim', type=int, default=109)
-    parser.add_argument('--edge_feat_dim', type=int, default=13')
+    parser.add_argument('--edge_feat_dim', type=int, default=13)
     parser.add_argument('--edge_output_dim', type=int, default=400)
     parser.add_argument('--node_output_dim', type=int, default=400)
     parser.add_argument('--extra_dim', type=int, default=19)
@@ -149,7 +134,7 @@ def parse_args():
     parser.add_argument('--num_experts', type=int, default=4)
     parser.add_argument('--moe_hid_dim', type=int, default=400)
     
-   
+    # Training parameters
     parser.add_argument('--learning_rate', type=float, default=0.0001)
     parser.add_argument('--batch_size', type=int, default=24)
     parser.add_argument('--max_epochs', type=int, default=500)
@@ -160,13 +145,13 @@ def parse_args():
     parser.add_argument('--lambda_kd', type=float, default=0.2)
     parser.add_argument('--temperature', type=float, default=6.0)
     parser.add_argument('--teacher_dropout', type=float, default=0.2)
-    parser.add_argument('--student_dropout', type=float, default=0.0')
+    parser.add_argument('--student_dropout', type=float, default=0.2)
     
-    # Cross-validation parameters
-    parser.add_argument('--num_folds', type=int, default=10)
-    parser.add_argument('--cv_random_state', type=int, default=2)
+    # Train/test split parameters
+    parser.add_argument('--test_size', type=float, default=0.1)
+    parser.add_argument('--split_random_state', type=int, default=2)
     
-    
+    # Other parameters
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--accelerator', type=str, default='gpu', choices=['gpu', 'cpu'])
     parser.add_argument('--devices', type=int, default=1)
@@ -179,9 +164,8 @@ def main():
 
     set_seed(args.seed)
 
-
+    # Load student dataset
     student_df = pd.read_csv(args.small_data_path)
-
 
     # Setup output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -195,6 +179,7 @@ def main():
     
     print(f'\nTeacher model path: {teacher_model_path}')
 
+    # Load teacher model if exists
     if os.path.exists(teacher_model_path):
         teacher_model = dmpnn(
             node_feat_dim=args.node_feat_dim,
@@ -210,99 +195,101 @@ def main():
 
         try:
             teacher_model.load_state_dict(torch.load(teacher_model_path), strict=False)
+            print('Teacher model loaded successfully!')
         except Exception as e:
             print(f'Error loading teacher model: {e}')
+            print('Training without knowledge distillation...')
             teacher_model = None
     else:
         print(f'Teacher model not found at {teacher_model_path}')
+        print('Training without knowledge distillation...')
         teacher_model = None
 
-    # Cross-validation setup
+    # Train/test split
     print(f'\n{"="*70}')
-    print(f'Starting {args.num_folds}-Fold Cross-Validation')
+    print(f'Splitting dataset into train and test sets')
     print(f'{"="*70}')
     
-    kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=args.cv_random_state)
+    unique_smiles = student_df['SMILES'].unique()
+    train_smiles, test_smiles = train_test_split(
+        unique_smiles, 
+        test_size=args.test_size,
+        random_state=args.split_random_state,
+        shuffle=True
+    )
+    
+    train_indices = student_df[student_df['SMILES'].isin(train_smiles)].index
+    test_indices = student_df[student_df['SMILES'].isin(test_smiles)].index
 
-    for fold, (train_index, val_index) in enumerate(kf.split(student_df['SMILES'].unique()), start=1):
-        print(f'\n{"="*70}')
-        print(f'Training Fold {fold}/{args.num_folds}')
-        print(f'{"="*70}')
-        
-        # Split data by unique SMILES
-        train_smiles = student_df['SMILES'].unique()[train_index]
-        val_smiles = student_df['SMILES'].unique()[val_index]
-        train_indices = student_df[student_df['SMILES'].isin(train_smiles)].index
-        val_indices = student_df[student_df['SMILES'].isin(val_smiles)].index
+    train_df = student_df.iloc[train_indices]
+    test_df = student_df.iloc[test_indices]
+    
+    print(f'Train size: {len(train_df)}, Test size: {len(test_df)}')
 
-        train_df = student_df.iloc[train_indices]
-        val_df = student_df.iloc[val_indices]
-        
+    # Save data splits
+    train_df.to_csv(os.path.join(args.output_dir, 'train.csv'), index=False)
+    test_df.to_csv(os.path.join(args.output_dir, 'test.csv'), index=False)
 
-        # Setup fold directory and save data splits
-        fold_dir = os.path.join(args.output_dir, f'fold{fold}')
-        os.makedirs(fold_dir, exist_ok=True)
-        train_df.to_csv(os.path.join(fold_dir, 'train.csv'), index=False)
-        val_df.to_csv(os.path.join(fold_dir, 'val.csv'), index=False)
+    # Initialize student model
+    student_model = dmpnn(
+        node_feat_dim=args.node_feat_dim,
+        edge_feat_dim=args.edge_feat_dim,
+        edge_output_dim=args.edge_output_dim,
+        node_output_dim=args.node_output_dim,
+        extra_dim=args.extra_dim,
+        num_rounds=args.num_rounds,
+        dropout_rate=args.student_dropout,
+        num_experts=args.num_experts,
+        moe_hid_dim=args.moe_hid_dim
+    )
 
-        # Initialize student model
-        student_model = dmpnn(
-            node_feat_dim=args.node_feat_dim,
-            edge_feat_dim=args.edge_feat_dim,
-            edge_output_dim=args.edge_output_dim,
-            node_output_dim=args.node_output_dim,
-            extra_dim=args.extra_dim,
-            num_rounds=args.num_rounds,
-            dropout_rate=args.student_dropout,
-            num_experts=args.num_experts,
-            moe_hid_dim=args.moe_hid_dim
-        )
+    student_module = LitGraphModel(
+        student_model, 
+        teacher_model,
+        os.path.join(args.output_dir, 'train.csv'),
+        os.path.join(args.output_dir, 'test.csv'),
+        learning_rate=args.learning_rate,
+        lambda_=args.lambda_kd,
+        temperature=args.temperature
+    )
 
-        student_module = LitGraphModel(
-            student_model, 
-            teacher_model,
-            os.path.join(fold_dir, 'train.csv'),
-            os.path.join(fold_dir, 'val.csv'),
-            learning_rate=args.learning_rate,
-            lambda_=args.lambda_kd,
-            temperature=args.temperature
-        )
+    # Setup training
+    logger = TensorBoardLogger(os.path.join(args.output_dir, 'student_logs'), name='logs_student')
+    
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join(args.output_dir, 'student_model'),
+        filename='best-{epoch:02d}-{val_loss:.4f}',
+        monitor='val_loss',
+        mode='min',
+        save_top_k=1,
+        verbose=True
+    )
+    
+    early_stopping_callback = EarlyStopping(
+        monitor='val_loss', 
+        patience=args.patience, 
+        verbose=True,
+        mode='min'
+    )
 
-        
-        logger = TensorBoardLogger(os.path.join(fold_dir, 'student_logs'), name='logs_student')
-        
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=os.path.join(fold_dir, 'student_model'),
-            filename='best-{epoch:02d}-{val_loss:.4f}',
-            monitor='val_loss',
-            mode='min',
-            save_top_k=1,
-            verbose=True
-        )
-        
-        early_stopping_callback = EarlyStopping(
-            monitor='val_loss', 
-            patience=args.patience, 
-            verbose=True,
-            mode='min'
-        )
-
-        trainer = Trainer(
-            max_epochs=args.max_epochs, 
-            logger=logger, 
-            callbacks=[checkpoint_callback, early_stopping_callback],
-            accelerator=args.accelerator, 
-            devices=args.devices,
-            deterministic=True,
-            enable_progress_bar=True
-        )
-
-        trainer.fit(student_module)
-        
-
+    trainer = Trainer(
+        max_epochs=args.max_epochs, 
+        logger=logger, 
+        callbacks=[checkpoint_callback, early_stopping_callback],
+        accelerator=args.accelerator, 
+        devices=args.devices,
+        deterministic=True,
+        enable_progress_bar=True
+    )
 
     print(f'\n{"="*70}')
-    print(f'All {args.num_folds} folds completed successfully!')
+    print(f'Starting training')
+    print(f'{"="*70}')
+    
+    trainer.fit(student_module)
+    
+    print(f'\n{"="*70}')
+    print(f'Training completed successfully!')
     print(f'{"="*70}')
 
 
