@@ -32,7 +32,7 @@ def load_model(checkpoint_path, model_cls):
     return trained_model
 
 def parse_args():
-    
+    parser = argparse.ArgumentParser(description='Classification Prediction')
     # Model  parameters
     parser.add_argument('--node_feat_dim', type=int, default=109)
     parser.add_argument('--edge_feat_dim', type=int, default=13)
