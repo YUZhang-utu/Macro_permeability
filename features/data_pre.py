@@ -1,6 +1,7 @@
 from rdkit import Chem
 import torch
 import dgl
+from typing import List
 
 class Featurization_parameters:
 
