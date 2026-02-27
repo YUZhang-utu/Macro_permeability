@@ -30,7 +30,7 @@ conda env create -f environment.yml -n macro_p
 ##### * Save data as same as files in Example
 ##### * Classification prediction
 ```
-python Prediction/classification_predict.py --checkpoint_path classification_model.ckpt --input_csv new_data.csv
+python -m Prediction.classification_predict --checkpoint_path classification_model.ckpt --input_csv input_file.csv --output_csv result.csv
 ```
 ##### * Regression prediction
 ```
