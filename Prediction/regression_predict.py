@@ -24,12 +24,29 @@ class InferenceModule(LightningModule):
         return outputs
 
 def load_model(checkpoint_path, model_cls):
-    trained_model = InferenceModule.load_from_checkpoint(
-        checkpoint_path, 
-        model=model_cls
-    )
-    trained_model.eval()  
-    trained_model.freeze() 
+
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint['state_dict']
+    new_state_dict = {}
+    renamed_count = 0
+    
+    for key, value in state_dict.items():
+        if '_solute' in key:
+            new_key = key.replace('_solute', '')
+            new_state_dict[new_key] = value
+            renamed_count += 1
+        else:
+            new_state_dict[key] = value
+    
+    if renamed_count > 0:
+        print(f"✓ Renamed {renamed_count} parameter keys (_solute → '')")
+    
+    
+    trained_model = InferenceModule(model_cls)
+    trained_model.load_state_dict(new_state_dict)
+    trained_model.eval()
+    trained_model.freeze()
+    
     return trained_model
 
 def parse_args():
