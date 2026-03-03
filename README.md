@@ -33,6 +33,5 @@ conda env create -f environment.yml -n macro_p
 python -m Prediction.classification_predict --checkpoint_path classification_model.ckpt --input_csv input_file.csv --output_csv result.csv
 ```
 ##### * Regression prediction
-```
-python Prediction/regression_predict.py --checkpoint_path regression_model.ckpt --input_csv new_data.csv
+```python -m Prediction.regression_predict --checkpoint_path regression_model.ckpt --input_csv input_file.csv --output_csv result.csv
 ```
